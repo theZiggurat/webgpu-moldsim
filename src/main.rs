@@ -3,6 +3,7 @@ use wgpu::{include_spirv, util::DeviceExt};
 
 #[path = "./framework.rs"]
 mod framework;
+mod util;
 
 const NUM_PARTICLES: u32 = 1024;
 const PARTICLES_PER_GROUP: u32 = 64;
@@ -60,7 +61,10 @@ impl framework::Framework for MoldSim {
             _ => {} //TODO
         }
 
-        let (compute_shader, decay_shader, diffuse_shader, draw_shader) = create_shaders(&device);
+        let compute_shader = crate::util::create_shader(device, "./resources/spirv/compute.spv");
+        let decay_shader = crate::util::create_shader(device, "./resources/spirv/decay.spv");
+        let diffuse_shader = crate::util::create_shader(device, "./resources/spirv/diffuse.spv");
+        let draw_shader = crate::util::create_shader(device, "./resources/spirv/draw.spv");
 
         let sim_param_data: Vec<f32> = [
             1./144., // deltaT
@@ -584,62 +588,7 @@ impl framework::Framework for MoldSim {
     }
 }
 
-#[cfg(debug_assertions)]
-fn create_shaders(device: &wgpu::Device) -> (wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule) {
 
-    use std::io::prelude::*;
-    use std::fs::File;
-
-    let mut file = File::open("./resources/spirv/compute.spv").unwrap();
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).unwrap();
-
-    let compute_shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: Some("compute shader"),
-        source: wgpu::util::make_spirv(&buf[..]),
-        flags: wgpu::ShaderFlags::VALIDATION
-    });
-
-    let mut file = File::open("./resources/spirv/decay.spv").unwrap();
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).unwrap();
-
-    let decay_shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: Some("decay shader"),
-        source: wgpu::util::make_spirv(&buf[..]),
-        flags: wgpu::ShaderFlags::VALIDATION
-    });
-
-    let mut file = File::open("./resources/spirv/diffuse.spv").unwrap();
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).unwrap();
-
-    let diffuse_shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: Some("diffuse shader"),
-        source: wgpu::util::make_spirv(&buf[..]),
-        flags: wgpu::ShaderFlags::VALIDATION
-    });
-
-    let mut file = File::open("./resources/spirv/draw.spv").unwrap();
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).unwrap();
-
-    let draw_shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: Some("draw shader"),
-        source: wgpu::util::make_spirv(&buf[..]),
-        flags: wgpu::ShaderFlags::VALIDATION
-    });
-    (compute_shader, decay_shader, diffuse_shader, draw_shader)
-}
-
-#[cfg(not(debug_assertions))]
-fn create_shaders(device: &wgpu::Device) -> (wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule) {
-    let compute_shader = device.create_shader_module(&include_spirv!("../resources/spirv/compute.spv"));
-    let decay_shader = device.create_shader_module(&include_spirv!("../resources/spirv/decay.spv"));
-    let diffuse_shader = device.create_shader_module(&include_spirv!("../resources/spirv/diffuse.spv"));
-    let draw_shader = device.create_shader_module(&include_spirv!("../resources/spirv/draw.spv"));
-    (compute_shader, decay_shader, diffuse_shader, draw_shader)
-}
 
 /// run example
 fn main() {
