@@ -1,0 +1,31 @@
+[package]
+name = "imgui-test"
+version = "0.1.0"
+authors = ["Max <frappyd@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+wgpu = "0.7"
+imgui = "0.7"
+imgui-winit-support = "0.7"
+imgui-wgpu = "0.14.0"
+winit = "0.24"
+log = "0.4"
+smallvec = "1"
+bytemuck = { version = "1.4", features = ["derive"] }
+cgmath = "0.17"
+futures = "0.3"
+image = "0.23"
+raw-window-handle = "0.3"
+wgpu-subscriber = "0.1"
+async-executor = "1.0"
+pollster = "0.2"
+env_logger = "0.8"
+rand = "0.8.3"
+
+[dev-dependencies.naga]
+git = "https://github.com/gfx-rs/naga"
+tag = "gfx-19"
+features = ["wgsl-in"]
