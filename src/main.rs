@@ -1,19 +1,25 @@
+use params::ParamManager;
 use rand::Rng;
-use wgpu::{include_spirv, util::DeviceExt};
+use wgpu::util::DeviceExt;
+use crate::uniform::Uniform;
 
 #[path = "./framework.rs"]
 mod framework;
 mod util;
+mod params;
+mod uniform;
 
-const NUM_PARTICLES: u32 = 1024;
 const PARTICLES_PER_GROUP: u32 = 64;
-
-const SCREEN_SIZE: (u32, u32) = (1600, 900);
+const SCREEN_SIZE: (u32, u32) = (3200, 1800);
 
 struct SimBuffers {
     particle_buffers: Vec<wgpu::Buffer>,
     trail_textures: Vec<wgpu::Texture>,
     vertices_buffer: wgpu::Buffer, 
+    particle_uniform: wgpu::Buffer,
+    decay_uniform: wgpu::Buffer,
+    diffuse_uniform: wgpu::Buffer,
+    render_uniform: wgpu::Buffer,
 }
 
 struct SimBindGroups {
@@ -35,6 +41,7 @@ struct SimPipelines {
 }
 
 struct MoldSim {
+    params: ParamManager,
     buffers: SimBuffers,
     bind_groups: SimBindGroups,
     pipelines: SimPipelines,
@@ -53,6 +60,8 @@ impl framework::Framework for MoldSim {
         _queue: &wgpu::Queue,
     ) -> Self {
 
+        let params = params::ParamManager::from_json("./resources/params.json");
+
         let mut flags = wgpu::ShaderFlags::VALIDATION;
         match adapter.get_info().backend {
             wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Gl => {
@@ -61,28 +70,13 @@ impl framework::Framework for MoldSim {
             _ => {} //TODO
         }
 
-        let compute_shader = crate::util::create_shader(device, "./resources/spirv/compute.spv");
-        let decay_shader = crate::util::create_shader(device, "./resources/spirv/decay.spv");
-        let diffuse_shader = crate::util::create_shader(device, "./resources/spirv/diffuse.spv");
-        let draw_shader = crate::util::create_shader(device, "./resources/spirv/draw.spv");
-
-        let sim_param_data: Vec<f32> = [
-            1./144., // deltaT
-            0.1,     // rule1Distance
-            0.025,   // rule2Distance
-            0.025,   // rule3Distance
-            0.02,    // rule1Scale
-            0.05,    // rule2Scale
-            0.005,   // rule3Scale
-        ]
-        .to_vec();
-
-        let sim_param_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Simulation Parameter Buffer"),
-            contents: bytemuck::cast_slice(&sim_param_data),
-            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
-        });
-
+        let (compute_shader, decay_shader, diffuse_shader, draw_shader) = 
+        (
+            crate::util::create_shader(device, "./resources/spirv/compute.spv"),
+            crate::util::create_shader(device, "./resources/spirv/decay.spv"),
+            crate::util::create_shader(device, "./resources/spirv/diffuse.spv"),
+            crate::util::create_shader(device, "./resources/spirv/draw.spv")
+        );
 
         let texture_size = wgpu::Extent3d {
             width: SCREEN_SIZE.0,
@@ -102,6 +96,7 @@ impl framework::Framework for MoldSim {
 
         let pipelines = {
 
+            log::info!("Creating particle bind group...");
             let particle_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -111,9 +106,7 @@ impl framework::Framework for MoldSim {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(
-                                (sim_param_data.len() * std::mem::size_of::<f32>()) as _,
-                            ),
+                            min_binding_size: params.current().particle.memsize(),
                         },
                         count: None,
                     },
@@ -123,7 +116,7 @@ impl framework::Framework for MoldSim {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new((NUM_PARTICLES * 16) as _),
+                            min_binding_size: wgpu::BufferSize::new((params.global.max_particles * 16) as _),
                         },
                         count: None,
                     },
@@ -133,7 +126,7 @@ impl framework::Framework for MoldSim {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new((NUM_PARTICLES * 16) as _),
+                            min_binding_size: wgpu::BufferSize::new((params.global.max_particles * 16) as _),
                         },
                         count: None,
                     },
@@ -161,12 +154,23 @@ impl framework::Framework for MoldSim {
                 label: None,
             });
 
+            log::info!("Creating decay bind group...");
             let decay_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStage::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: params.current().decay.memsize(),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStage::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::ReadOnly,
                             format: wgpu::TextureFormat::R32Float,
@@ -175,7 +179,7 @@ impl framework::Framework for MoldSim {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStage::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -188,12 +192,23 @@ impl framework::Framework for MoldSim {
                 label: None,
             });
 
+            log::info!("Creating diffuse bind group...");
             let diffuse_bind_group_layout = 
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStage::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: params.current().diffuse.memsize(),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStage::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::ReadOnly,
                             format: wgpu::TextureFormat::R32Float,
@@ -202,7 +217,7 @@ impl framework::Framework for MoldSim {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStage::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -215,11 +230,22 @@ impl framework::Framework for MoldSim {
                 label: None,
             });
 
+            log::info!("Creating render bind group...");
             let render_bind_group_layout = 
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: params.current().render.memsize(),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
                         visibility: wgpu::ShaderStage::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
@@ -229,7 +255,7 @@ impl framework::Framework for MoldSim {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStage::FRAGMENT,
                         ty: wgpu::BindingType::Sampler {
                             comparison: false,
@@ -241,6 +267,7 @@ impl framework::Framework for MoldSim {
                 label: None,
             });
 
+            log::info!("Creating particle pipeline layout...");
             let particle_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("particle"),
@@ -248,6 +275,7 @@ impl framework::Framework for MoldSim {
                 push_constant_ranges: &[],
             });
 
+            log::info!("Creating decay pipeline layout...");
             let decay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("decay"),
@@ -255,6 +283,7 @@ impl framework::Framework for MoldSim {
                 push_constant_ranges: &[],
             });
 
+            log::info!("Creating diffuse pipeline layout...");
             let diffuse_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("diffuse"),
@@ -262,6 +291,7 @@ impl framework::Framework for MoldSim {
                 push_constant_ranges: &[],
             });
 
+            log::info!("Creating render pipeline layout...");
             let render_pipeline_layout =
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("render"),
@@ -269,6 +299,31 @@ impl framework::Framework for MoldSim {
                     push_constant_ranges: &[],
             });
 
+            log::info!("Creating particle pipeline...");
+            let particle_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Particle compute pipeline"),
+                layout: Some(&particle_pipeline_layout),
+                module: &compute_shader,
+                entry_point: "main",
+            });
+    
+            log::info!("Creating decay pipeline...");
+            let trail_decay_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Decay compute pipeline"),
+                layout: Some(&decay_pipeline_layout),
+                module: &decay_shader,
+                entry_point: "main",
+            });
+    
+            log::info!("Creating diffuse pipeline...");
+            let trail_diffuse_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Diffuse compute pipeline"),
+                layout: Some(&diffuse_pipeline_layout),
+                module: &diffuse_shader,
+                entry_point: "main",
+            });
+
+            log::info!("Creating render pipeline...");
             let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
                 layout: Some(&render_pipeline_layout),
@@ -291,27 +346,6 @@ impl framework::Framework for MoldSim {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-            });
-    
-            let particle_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Particle compute pipeline"),
-                layout: Some(&particle_pipeline_layout),
-                module: &compute_shader,
-                entry_point: "main",
-            });
-    
-            let trail_decay_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Decay compute pipeline"),
-                layout: Some(&decay_pipeline_layout),
-                module: &decay_shader,
-                entry_point: "main",
-            });
-    
-            let trail_diffuse_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Diffuse compute pipeline"),
-                layout: Some(&diffuse_pipeline_layout),
-                module: &diffuse_shader,
-                entry_point: "main",
             });
 
             SimPipelines {
@@ -339,10 +373,10 @@ impl framework::Framework for MoldSim {
             let mut trail_textures = Vec::<wgpu::Texture>::new();
     
             let mut rng = rand::thread_rng();
-            let mut initial_particle_data = vec![0.0f32; (4 * NUM_PARTICLES) as usize];
+            let mut initial_particle_data = vec![0.0f32; (4 * params.global.max_particles) as usize];
             for particle_instance_chunk in initial_particle_data.chunks_mut(4) {
-                particle_instance_chunk[0] = rng.gen::<f32>() * 2.0 - 1.0;
-                particle_instance_chunk[1] = rng.gen::<f32>() * 2.0 - 1.0;
+                particle_instance_chunk[0] = rng.gen::<f32>();
+                particle_instance_chunk[1] = rng.gen::<f32>();
                 particle_instance_chunk[2] = rng.gen::<f32>() * 2.0 - 1.0;
                 particle_instance_chunk[3] = rng.gen::<f32>() * 2.0 - 1.0;
             }
@@ -366,15 +400,43 @@ impl framework::Framework for MoldSim {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::R32Float,
-                        usage: wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::SAMPLED,
+                        usage: wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST,
                     }
                 ));
             }
 
+            let particle_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Simulation Parameter Buffer"),
+                contents: params.current().particle.to_bytes(),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
+
+            let decay_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Simulation Parameter Buffer"),
+                contents: params.current().decay.to_bytes(),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
+
+            let diffuse_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Simulation Parameter Buffer"),
+                contents: params.current().diffuse.to_bytes(),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
+
+            let render_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Simulation Parameter Buffer"),
+                contents: params.current().render.to_bytes(),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
+
             SimBuffers {
                 vertices_buffer,
                 particle_buffers,
-                trail_textures
+                trail_textures,
+                particle_uniform,
+                decay_uniform,
+                diffuse_uniform,
+                render_uniform
             }
         };
 
@@ -393,7 +455,7 @@ impl framework::Framework for MoldSim {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: sim_param_buffer.as_entire_binding(),
+                            resource: buffers.particle_uniform.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -420,10 +482,14 @@ impl framework::Framework for MoldSim {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[(i + 1) % 2].create_view(&desc)),
+                            resource: buffers.decay_uniform.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[(i + 1) % 2].create_view(&desc)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
                             resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[i].create_view(&desc)), // bind to opposite buffer
                         },
                     ],
@@ -435,10 +501,14 @@ impl framework::Framework for MoldSim {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[i].create_view(&desc)),
+                            resource: buffers.diffuse_uniform.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[i].create_view(&desc)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
                             resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[(i + 1) % 2].create_view(&desc)), // bind to opposite buffer
                         },
                     ],
@@ -450,10 +520,14 @@ impl framework::Framework for MoldSim {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[(i + 1) % 2].create_view(&desc)),
+                            resource: buffers.render_uniform.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&buffers.trail_textures[(i + 1) % 2].create_view(&desc)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
                             resource: wgpu::BindingResource::Sampler(&sampler),
                         },
                     ],
@@ -472,25 +546,27 @@ impl framework::Framework for MoldSim {
 
         // calculates number of work groups from PARTICLES_PER_GROUP constant
         let particle_work_group_count =
-            ((NUM_PARTICLES as f32) / (PARTICLES_PER_GROUP as f32)).ceil() as u32;
+            ((params.current().particle.num_particles as f32) / (PARTICLES_PER_GROUP as f32)).ceil() as u32;
 
         let screen_work_group_count: (u32, u32) = 
             ((SCREEN_SIZE.0 as f32 / 16.0).ceil() as u32, (SCREEN_SIZE.1 as f32 / 16.0).ceil() as u32);
 
-        println!("{:?}", screen_work_group_count);
+        log::info!("Particle work group count: {:?}", (particle_work_group_count, particle_work_group_count));
+        log::info!("Screen work group count: {:?}", screen_work_group_count);
 
         MoldSim {
+            params,
             buffers,
             bind_groups,
             pipelines,
             particle_work_group_count,
             screen_work_group_count,
-            frame_num: 0
+            frame_num: 0,
         }
     }
 
     /// update is called for any WindowEvent not handled by the framework
-    fn update(&mut self, _event: winit::event::WindowEvent) {}
+    fn update(&mut self, _event: &winit::event::WindowEvent) {}
 
     /// resize is called on WindowEvent::Resized events
     fn resize(
@@ -512,6 +588,21 @@ impl framework::Framework for MoldSim {
         _spawner: &framework::Spawner,
     ) {
 
+        self.particle_work_group_count = ((self.params.current().particle.num_particles as f32) / (PARTICLES_PER_GROUP as f32)).ceil() as u32;
+
+        // update uniforms
+        // TODO: only update when value is changed
+        queue.write_buffer(&self.buffers.particle_uniform, 0, self.params.current().particle.to_bytes());
+        queue.write_buffer(&self.buffers.decay_uniform, 0, self.params.current().decay.to_bytes());
+        queue.write_buffer(&self.buffers.diffuse_uniform, 0, self.params.current().diffuse.to_bytes());
+
+        let r = &self.params.current().render;
+        let vec: Vec<f32> = vec![
+            r.color_1[0], r.color_1[1], r.color_1[2], r.color_2[0], r.color_2[1], r.color_2[2], r.color_pow, r.cutoff
+        ];
+        queue.write_buffer(&self.buffers.render_uniform, 0, bytemuck::cast_slice(vec.as_slice()));
+
+
         let color_attachments = [wgpu::RenderPassColorAttachmentDescriptor {
             attachment: &frame.view,
             resolve_target: None,
@@ -526,15 +617,11 @@ impl framework::Framework for MoldSim {
             depth_stencil_attachment: None,
         };
 
-
-        // get command encoder
         let mut command_encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        // compute buffer
         command_encoder.push_debug_group("compute particle movement");
         {
-            // compute pass
             let mut cpass =
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
             cpass.set_pipeline(&self.pipelines.particle_compute_pipeline);
@@ -543,54 +630,144 @@ impl framework::Framework for MoldSim {
         }
         command_encoder.pop_debug_group();
 
-        command_encoder.push_debug_group("compute trail decay");
-        {
-            let mut cpass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
-            cpass.set_pipeline(&self.pipelines.trail_decay_compute_pipeline);
-            cpass.set_bind_group(0, &self.bind_groups.trail_decay_bind_groups[self.frame_num % 2], &[]);
-            cpass.dispatch(self.screen_work_group_count.0, self.screen_work_group_count.1, 1);
+        if self.params.global.post_enabled {
+            command_encoder.push_debug_group("compute trail decay");
+            {
+                let mut cpass =
+                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
+                cpass.set_pipeline(&self.pipelines.trail_decay_compute_pipeline);
+                cpass.set_bind_group(0, &self.bind_groups.trail_decay_bind_groups[self.frame_num % 2], &[]);
+                cpass.dispatch(self.screen_work_group_count.0, self.screen_work_group_count.1, 1);
+            }
+            command_encoder.pop_debug_group();
+            command_encoder.push_debug_group("compute trail diffuse");
+            {
+                let mut cpass =
+                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
+                cpass.set_pipeline(&self.pipelines.trail_diffuse_compute_pipeline);
+                cpass.set_bind_group(0, &self.bind_groups.trail_diffuse_bind_groups[self.frame_num % 2], &[]);
+                cpass.dispatch(self.screen_work_group_count.0, self.screen_work_group_count.1, 1);
+            }
+            command_encoder.pop_debug_group();
         }
-        command_encoder.pop_debug_group();
 
-        command_encoder.push_debug_group("compute trail diffuse");
+        command_encoder.push_debug_group("render to screen");
         {
-            let mut cpass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
-            cpass.set_pipeline(&self.pipelines.trail_diffuse_compute_pipeline);
-            cpass.set_bind_group(0, &self.bind_groups.trail_diffuse_bind_groups[self.frame_num % 2], &[]);
-            cpass.dispatch(self.screen_work_group_count.0, self.screen_work_group_count.1, 1);
-        }
-        command_encoder.pop_debug_group();
-
-        // render texture to screen
-        command_encoder.push_debug_group("render boids");
-        {
-            // render pass
             let mut rpass = command_encoder.begin_render_pass(&render_pass_descriptor);
             rpass.set_pipeline(&self.pipelines.render_pipeline);
-            // render dst particles
-            // the three instance-local vertices
             rpass.set_vertex_buffer(0, self.buffers.vertices_buffer.slice(..));
             rpass.set_bind_group(0, &self.bind_groups.render_bind_groups[self.frame_num % 2], &[]);
             rpass.draw(0..6, 0..1);
         }
         command_encoder.pop_debug_group();
 
-        // update frame count
         self.frame_num += 1;
 
-        // done
         queue.submit(Some(command_encoder.finish()));
+    }
 
-        // to update uniform buffers
-        // self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
+    fn ui(
+        &mut self,
+        ui: &imgui::Ui
+    ) {
+        
+        use imgui::Condition;
+        use imgui::im_str;
+
+        //ui.show_default_style_editor();
+        //ui.show_demo_window(&mut true);
+
+        let window = imgui::Window::new(im_str!("Configs"));
+        window
+            .size([300.0, 600.0], Condition::FirstUseEver)
+            .bg_alpha(1.0)
+            .menu_bar(true)
+            .build(&ui, || {
+
+                if let Some(token) = ui.begin_menu_bar() {
+                    if imgui::MenuItem::new(im_str!("New")).build(ui) {
+                        self.params.new();
+                    }
+                    if imgui::MenuItem::new(im_str!("Save")).build(ui) {
+                        self.params.save("./resources/params.json");
+                    }
+                    token.end(ui);
+                }
+
+                let status = if self.params.global.post_enabled {
+                    im_str!("Post-processing enabled")
+                } else {
+                    im_str!("Post-processing disabled")
+                };
+                
+                imgui::ComboBox::new(im_str!("Preset"))
+                    .flags(imgui::ComboBoxFlags::empty())
+                    //.preview_value(&imgui::ImString::new(self.params.current_name()))
+                    .build_simple(ui, &mut self.params.current, &self.params.params[..], &|p: &crate::params::Params| {
+                        std::borrow::Cow::from(imgui::ImString::new(&p.name))
+                });
+
+                let mut str = imgui::ImString::new(&self.params.current().name);
+                imgui::InputText::new(ui, im_str!("Name"), &mut str)
+                    .no_horizontal_scroll(true)
+                    .build();
+                self.params.current_mut().name = str.to_string();
+
+                
+                if ui.radio_button_bool(status, true) {
+                    self.params.global.post_enabled = !self.params.global.post_enabled
+                }
+
+                unsafe {
+                    ui.text(im_str!("Particle Compute"));
+                    imgui::Slider::new(im_str!("Num Particles"))
+                        .range(0u32..=self.params.global.max_particles-1)
+                        .build(ui, &mut self.params.current_mut().particle.num_particles);
+                    imgui::Slider::new(im_str!("Trail Power"))
+                        .range(0.0..=64.0)
+                        .build(ui, &mut self.params.current_mut().particle.trail_power);
+                    imgui::Slider::new(im_str!("Speed"))
+                        .range(0.0..=15.0)
+                        .build(ui, &mut self.params.current_mut().particle.speed);
+                    imgui::Slider::new(im_str!("Sensor Angle"))
+                        .range(0.0..=1.5)
+                        .build(ui, &mut self.params.current_mut().particle.sensor_angle);
+                    imgui::Slider::new(im_str!("Sensor Distance"))
+                        .range(0.0..=0.01)
+                        .build(ui, &mut self.params.current_mut().particle.sensor_distance);
+                    imgui::Slider::new(im_str!("Turn Speed"))
+                        .range(0.0..=3.14)
+                        .build(ui, &mut self.params.current_mut().particle.turn_speed);
+                    ui.separator();
+                    ui.text(im_str!("Decay Compute"));
+                    imgui::Slider::new(im_str!("Decay Factor"))
+                        .range(0.5..=1.0)
+                        .build(ui, &mut self.params.current_mut().decay.decay_rate);
+                    ui.separator();
+                    ui.text(im_str!("Diffuse Compute"));
+                    imgui::Slider::new(im_str!("Diffuse Amount"))
+                        .range(0.0..=1.0)
+                        .build(ui, &mut self.params.current_mut().diffuse.diffuse_amount);
+                    ui.separator();
+                    ui.text(im_str!("Render"));
+                    imgui::Slider::new(im_str!("Color Power"))
+                        .range(0.2..=1.0)
+                        .build(ui, &mut self.params.current_mut().render.color_pow);
+                    imgui::ColorPicker::new(im_str!("Color 1"), &mut self.params.current_mut().render.color_1)
+                        .input_mode(imgui::ColorEditInputMode::Rgb)
+                        .mode(imgui::ColorPickerMode::HueWheel)
+                        .build(ui);
+                    imgui::ColorPicker::new(im_str!("Color 2"), &mut self.params.current_mut().render.color_2)
+                        .input_mode(imgui::ColorEditInputMode::Rgb)
+                        .mode(imgui::ColorPickerMode::HueWheel)
+                        .build(ui);
+
+                }
+                
+        });
     }
 }
 
-
-
-/// run example
 fn main() {
     framework::run::<MoldSim>("Mold sim");
 }

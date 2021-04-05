@@ -1,4 +1,3 @@
-#[cfg(debug_assertions)]
 pub fn create_shader(device: &wgpu::Device, path: &str) -> wgpu::ShaderModule {
     use std::io::prelude::*;
     use std::fs::File;
@@ -15,11 +14,6 @@ pub fn create_shader(device: &wgpu::Device, path: &str) -> wgpu::ShaderModule {
         source: wgpu::util::make_spirv(&buf[..]),
         flags: wgpu::ShaderFlags::VALIDATION
     })
-}
-
-#[cfg(not(debug_assertions))]
-pub fn create_shader(device: &wgpu::Device, path: &str) -> wgpu::ShaderModule {
-    device.create_shader_module(&include_spirv!(path))
 }
 
 

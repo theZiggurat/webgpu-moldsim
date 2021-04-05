@@ -1,0 +1,4 @@
+[env]
+RUST_LOG="info"
+#PATH_TO_SOME_TOOL = { value = "bin/tool", relative = true }
+#USERNAME = { value = "test_user", force = true }

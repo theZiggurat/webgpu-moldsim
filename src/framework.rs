@@ -52,7 +52,7 @@ pub trait Framework: 'static + Sized {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     );
-    fn update(&mut self, event: WindowEvent);
+    fn update(&mut self, event: &WindowEvent);
     fn render(
         &mut self,
         frame: &wgpu::SwapChainTexture,
@@ -60,24 +60,41 @@ pub trait Framework: 'static + Sized {
         queue: &wgpu::Queue,
         spawner: &Spawner,
     );
+
+    fn ui(
+        &mut self,
+        ui: &imgui::Ui
+    );
 }
 
 struct Setup {
     window: winit::window::Window,
     event_loop: EventLoop<()>,
-    instance: wgpu::Instance,
+    _instance: wgpu::Instance,
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    imgui: imgui::Context,
+    platform: imgui_winit_support::WinitPlatform,
 }
 
 async fn setup<E: Framework>(title: &str) -> Setup {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        env_logger::init();
+        #[cfg(debug_assertions)] {
+            env_logger::builder().filter(None, log::LevelFilter::Info).init();
+        };
+        
+
+        #[cfg(not(debug_assertions))] 
+        {
+            env_logger::builder().filter(None, log::LevelFilter::Warn).init();
+        };
     };
+
+    log::info!("Logger started");
 
     let event_loop = EventLoop::new();
     let mut builder = winit::window::WindowBuilder::new();
@@ -150,6 +167,38 @@ async fn setup<E: Framework>(title: &str) -> Setup {
         println!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
     }
 
+    let hidpi_factor = window.scale_factor();
+
+    let mut imgui = imgui::Context::create();
+    imgui.style_mut().frame_rounding = 4.0;
+    imgui.style_mut().window_rounding = 6.0;
+    imgui.style_mut().frame_border_size = 1.0;
+    let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
+    platform.attach_window(
+        imgui.io_mut(),
+        &window,
+        imgui_winit_support::HiDpiMode::Default,
+    );
+    imgui.set_ini_filename(None);
+
+    let font_size = (13.0 * hidpi_factor) as f32;
+    imgui.io_mut().font_global_scale = (1.0 / hidpi_factor) as f32;
+
+    use std::io::Read;
+    let mut file = std::fs::File::open("./resources/fonts/Roboto-Light.ttf").unwrap();
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).unwrap();
+    imgui.fonts().add_font(&[imgui::FontSource::TtfData {
+        data: buf.as_slice(),
+        size_pixels: 11.0,
+        config: Some(imgui::FontConfig {
+            oversample_h: 1,
+            pixel_snap_h: true,
+            size_pixels: font_size,
+            ..Default::default()
+        }),
+    }]);
+
     let optional_features = E::optional_features();
     let required_features = E::required_features();
     let adapter_features = adapter.features();
@@ -177,12 +226,14 @@ async fn setup<E: Framework>(title: &str) -> Setup {
     Setup {
         window,
         event_loop,
-        instance,
+        _instance: instance,
         size,
         surface,
         adapter,
         device,
         queue,
+        imgui,
+        platform,
     }
 }
 
@@ -190,12 +241,14 @@ fn start<E: Framework>(
     Setup {
         window,
         event_loop,
-        instance,
+        _instance,
         size,
         surface,
         adapter,
         device,
         queue,
+        mut imgui,
+        mut platform,
     }: Setup,
 ) {
     let spawner = Spawner::new();
@@ -210,6 +263,13 @@ fn start<E: Framework>(
     };
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+    let renderer_config = imgui_wgpu::RendererConfig {
+        texture_format: sc_desc.format,
+        ..Default::default()
+    };
+
+    let mut renderer = imgui_wgpu::Renderer::new(&mut imgui, &device, &queue, renderer_config);
+
     log::info!("Initializing the example...");
     let mut example = E::init(&sc_desc, &adapter, &device, &queue);
 
@@ -218,7 +278,7 @@ fn start<E: Framework>(
 
     log::info!("Entering render loop...");
     event_loop.run(move |event, _, control_flow| {
-        let _ = (&instance, &adapter); // force ownership by the closure
+        //let _ = (&instance, &adapter); // force ownership by the closure
         *control_flow = if cfg!(feature = "metal-auto-capture") {
             ControlFlow::Exit
         } else {
@@ -228,13 +288,7 @@ fn start<E: Framework>(
             event::Event::RedrawEventsCleared => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    // Clamp to some max framerate to avoid busy-looping too much
-                    // (we might be in wgpu::PresentMode::Mailbox, thus discarding superfluous frames)
-                    //
-                    // winit has window.current_monitor().video_modes() but that is a list of all full screen video modes.
-                    // So without extra dependencies it's a bit tricky to get the max refresh rate we can run the window on.
-                    // Therefore we just go with 60fps - sorry 120hz+ folks!
-                    let target_frametime = Duration::from_secs_f64(1.0 / 60.0);
+                    let target_frametime = Duration::from_secs_f64(1.0 / 144.0);
                     let time_since_last_frame = last_update_inst.elapsed();
                     if time_since_last_frame >= target_frametime {
                         window.request_redraw();
@@ -252,7 +306,7 @@ fn start<E: Framework>(
                 window.request_redraw();
             }
             event::Event::WindowEvent {
-                event: WindowEvent::Resized(size),
+                event: WindowEvent::Resized(ref size),
                 ..
             } => {
                 log::info!("Resizing to {:?}", size);
@@ -261,7 +315,7 @@ fn start<E: Framework>(
                 example.resize(&sc_desc, &device, &queue);
                 swap_chain = device.create_swap_chain(&surface, &sc_desc);
             }
-            event::Event::WindowEvent { event, .. } => match event {
+            event::Event::WindowEvent { ref event, .. } => match event {
                 WindowEvent::KeyboardInput {
                     input:
                         event::KeyboardInput {
@@ -288,11 +342,49 @@ fn start<E: Framework>(
                             .expect("Failed to acquire next swap chain texture!")
                     }
                 };
-
+                
+                
                 example.render(&frame.output, &device, &queue, &spawner);
+
+                platform
+                    .prepare_frame(imgui.io_mut(), &window)
+                    .expect("Failed to prepare frame");
+                let ui = imgui.frame();
+                example.ui(&ui);
+                //example.render_imgui(&frame.output, &device, &queue, &spawner, &)
+
+                let mut encoder: wgpu::CommandEncoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+                // if last_cursor != Some(ui.mouse_cursor()) {
+                //     last_cursor = Some(ui.mouse_cursor());
+                //     platform.prepare_render(&ui, &window);
+                // }
+
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                        attachment: &frame.output.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    }],
+                    depth_stencil_attachment: None,
+                });
+
+                renderer
+                    .render(ui.render(), &queue, &device, &mut rpass)
+                    .expect("Rendering failed");
+
+                drop(rpass);
+
+                queue.submit(Some(encoder.finish()));
             }
             _ => {}
         }
+        platform.handle_event(imgui.io_mut(), &window, &event);
     });
 }
 
