@@ -1,4 +1,4 @@
-# wgpu-toy
+# webgpu-moldsim
 
 ![](https://media.giphy.com/media/DFGRbytr9paX39MUsP/giphy-downsized.gif)
 
